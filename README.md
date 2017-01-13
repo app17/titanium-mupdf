@@ -2,9 +2,9 @@
 
 ## Description
 
-This module extends the android project here - https://github.com/joniks/Android-MuPDF/ 
+This module extends the android project here - https://github.com/joniks/Android-MuPDF/
 
-## Usage
+## Usage v1.9
 
 ```javascript
 var enabled = true;
@@ -163,26 +163,101 @@ Ti.Gesture.addEventListener("orientationchange", function() {
 win.open();
 ```
 
+## Usage 1.9.3
+
+```javascript
+var READER_MODULE = require("com.mykingdom.mupdf");
+
+//Make sure the file exists
+var file = Ti.Filesystem.getFile(Ti.Filesystem.externalStorageDirectory, "sample.pdf");
+
+if (!file.exists()) {
+	var source = Ti.Filesystem.getFile(Ti.Filesystem.resourcesDirectory, "sample.pdf");
+	file.write(source.read());
+}
+
+var win = Ti.UI.createWindow({
+	backgroundColor : 'white',
+	exitOnClose : true
+});
+
+var pdfViewer = READER_MODULE.createView({
+    file : file,
+    width : Ti.UI.FILL,
+    height : Ti.UI.FILL
+});
+
+function displayPDF(e) {
+
+  win.add(pdfViewer);
+
+  if (OS_ANDROID) {
+    Alloy.Globals.navWindows.push();
+    win.open();
+  }
+}
+
+pdfViewer.addEventListener('successEvent', displayPDF);
+
+pdfViewer.setScrollingDirection(READER_MODULE.DIRECTION_VERTICAL);
+
+win.addEventListener("open", function(e){
+    var activity = $.pdfViewerWindow.getActivity();
+    activity.onCreateOptionsMenu = function(e) {
+
+      if( !pdfViewer.getNeedsPassword() ){
+        var printMenu = e.menu.add({
+            title : L("print", "Print")
+        });
+        printMenu.addEventListener("click", function(e) {
+            pdfViewer.print();
+        });
+      }
+
+      var closeMenu = e.menu.add({
+          title : L("close", "Close")
+      });
+      closeMenu.addEventListener("click", function(e) {
+          win.close();
+      });
+    };
+    activity.invalidateOptionsMenu();
+});
+
+Ti.Gesture.addEventListener("orientationchange", function() {
+    pdfViewer.setCurrentPage(pdfViewer.getCurrentPage());
+});
+```
+
+## Building
+
+To build the project use "ant"
+
 ## Changelog
+
+* 1.9.3
+	* Updated Titanium SDK to 5.1.2.GA
+	* Added support for password protected files
+	* Added support for printing files
 
 * 1.9.0
 	* Updated MuPDF library to the latest version (1.8) which addresses several crash issues.
-	* Updated Titanim SDK to 5.1.1.GA 
+	* Updated Titanim SDK to 5.1.1.GA
 
 * 1.8
 	* Verical Scrolling
-	* Updated Titanim SDK to 3.1.3.GA 
+	* Updated Titanim SDK to 3.1.3.GA
 
 * 1.7
 	* Search callback was never called when no results found on a page - fixed
 
 * v1.6
 	* crash issues fixed
-	
+
 * v1.5
 	* replaced createPDFReader with createView
 	* updated mupdf library to 1.7
-	* enchancements on search method 
+	* enchancements on search method
 
 * v1.4
 	* added methods setHighlightColor

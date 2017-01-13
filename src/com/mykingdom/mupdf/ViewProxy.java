@@ -14,6 +14,7 @@ import java.util.HashMap;
 import org.appcelerator.kroll.KrollDict;
 import org.appcelerator.kroll.KrollFunction;
 import org.appcelerator.kroll.KrollProxy;
+import org.appcelerator.kroll.KrollProxyListener;
 import org.appcelerator.kroll.annotations.Kroll;
 import org.appcelerator.kroll.common.Log;
 import org.appcelerator.kroll.common.TiConfig;
@@ -36,8 +37,33 @@ import com.artifex.mupdflib.SearchTaskResult;
 import com.artifex.mupdflib.FilePicker.FilePickerSupport;
 
 import android.app.Activity;
+import android.app.AlertDialog;
+import android.content.Context;
 import android.net.Uri;
 import android.os.Message;
+import android.content.DialogInterface;
+import android.os.Bundle;
+import android.widget.EditText;
+import android.view.inputmethod.EditorInfo;
+import android.text.method.PasswordTransformationMethod;
+import android.content.res.Resources;
+
+import android.os.CancellationSignal;
+import java.io.File;
+import java.io.FileDescriptor;
+import android.os.ParcelFileDescriptor;
+import java.io.OutputStream;
+import java.io.InputStream;
+import java.io.FileOutputStream;
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.io.FileNotFoundException;
+import android.print.PageRange;
+import android.print.PrintAttributes;
+import android.print.PrintDocumentAdapter;
+import android.print.PrintDocumentInfo;
+import android.print.PrintManager;
+import android.print.pdf.PrintedPdfDocument;
 
 // This proxy can be created by calling Mupdf.createPDFReader({file: "path"})
 @Kroll.proxy(creatableInModule = MupdfModule.class)
@@ -55,31 +81,21 @@ public class ViewProxy extends TiViewProxy {
 		private MuPDFCore core;
 		private SearchTask mSearchTask;
 		private KrollFunction mSearchCallback;
+		private KrollFunction mPrintCallback = null;
+		private KrollFunction mSuccessCallback = null;
 		private TiApplication tiApplication;
 		private int currentPage;
 		private int pageCount;
 		private boolean renderResult = false;
+		private File file;
+		private boolean needsPassword = false;
 
 		public PDFReaderView(TiViewProxy proxy) {
 
 			super(proxy);
 
-			LayoutArrangement arrangement = LayoutArrangement.DEFAULT;
-
-			if (proxy.hasProperty(TiC.PROPERTY_LAYOUT)) {
-				String layoutProperty = TiConvert.toString(proxy
-						.getProperty(TiC.PROPERTY_LAYOUT));
-				if (layoutProperty.equals(TiC.LAYOUT_HORIZONTAL)) {
-					arrangement = LayoutArrangement.HORIZONTAL;
-				} else if (layoutProperty.equals(TiC.LAYOUT_VERTICAL)) {
-					arrangement = LayoutArrangement.VERTICAL;
-				}
-			}
-
 			tiApplication = TiApplication.getInstance();
 
-			TiCompositeLayout view = new TiCompositeLayout(proxy.getActivity(),
-					arrangement);
 			mDocView = new MuPDFReaderView(getActivity()) {
 				@Override
 				protected void onMoveToChild(int i) {
@@ -100,8 +116,6 @@ public class ViewProxy extends TiViewProxy {
 					}
 				}
 			};
-			view.addView(mDocView);
-			setNativeView(view);
 		}
 
 		@Override
@@ -111,15 +125,22 @@ public class ViewProxy extends TiViewProxy {
 				try {
 					TiFileProxy fileProxy = (TiFileProxy) d
 							.get(TiC.PROPERTY_FILE);
-					File file = fileProxy.getBaseFile().getNativeFile();
+					file = fileProxy.getBaseFile().getNativeFile();
 					if (file.exists()) {
 						Log.d(TAG, "PDF exists, trying to load");
-						core = openFile(Uri.decode(Uri.fromFile(file)
-								.getEncodedPath()));
-						mDocView.setAdapter(new MuPDFPageAdapter(getActivity(),
-								this, core));
-						pageCount = core.countPages();
-						currentPage = 1;
+						core = openFile(Uri.decode(Uri.fromFile(file).getEncodedPath()));
+
+						needsPassword = core.needsPassword();
+
+						if (core != null && needsPassword) {
+							Log.d(TAG, "core.needsPassword");
+							requestPassword(getActivity());
+							return;
+						}
+						else {
+							Log.d(TAG, "!core.needsPassword");
+							createUI(getActivity());
+						}
 					}
 				} catch (Exception ex) {
 					String err = (ex.getMessage() == null) ? "Something wrong with the file given"
@@ -131,6 +152,33 @@ public class ViewProxy extends TiViewProxy {
 			super.processProperties(d);
 		}
 
+		private void createUI(Activity activity){
+
+			LayoutArrangement arrangement = LayoutArrangement.DEFAULT;
+
+			if (proxy.hasProperty(TiC.PROPERTY_LAYOUT)) {
+				String layoutProperty = TiConvert.toString(proxy
+						.getProperty(TiC.PROPERTY_LAYOUT));
+				if (layoutProperty.equals(TiC.LAYOUT_HORIZONTAL)) {
+					arrangement = LayoutArrangement.HORIZONTAL;
+				} else if (layoutProperty.equals(TiC.LAYOUT_VERTICAL)) {
+					arrangement = LayoutArrangement.VERTICAL;
+				}
+			}
+
+			TiCompositeLayout view = new TiCompositeLayout(proxy.getActivity(),
+					arrangement);
+			view.addView(mDocView);
+			Log.d(TAG, "setNativeView");
+			setNativeView(view);
+
+			mDocView.setAdapter(new MuPDFPageAdapter(activity, this, core));
+			pageCount = core.countPages();
+			currentPage = 1;
+			fireEvent("successEvent", new HashMap());
+			Log.d(TAG,"[pdfreader] successEvent fired");
+		}
+
 		public void cleanup() {
 			mDocView.releaseViews();
 			core.onDestroy();
@@ -138,6 +186,48 @@ public class ViewProxy extends TiViewProxy {
 			mSearchTask = null;
 			mDocView = null;
 			mSearchCallback = null;
+			mSuccessCallback = null;
+			mPrintCallback = null;
+		}
+
+		private EditText mPasswordView;
+		private AlertDialog.Builder mAlertBuilder;
+
+		public void requestPassword(Activity activity) {
+			mAlertBuilder = new AlertDialog.Builder(activity);
+			mPasswordView = new EditText(activity);
+			mPasswordView.setInputType(EditorInfo.TYPE_TEXT_VARIATION_PASSWORD);
+			mPasswordView.setTransformationMethod(new PasswordTransformationMethod());
+
+			AlertDialog.Builder alert = new AlertDialog.Builder(activity);
+			String packageName = proxy.getActivity().getPackageName();
+			Resources resources = proxy.getActivity().getResources();
+			int enter_password = resources.getIdentifier("enter_password", "string", packageName);
+		  alert.setTitle(enter_password);
+			alert.setView(mPasswordView);
+			alert.setPositiveButton("OK",
+					new DialogInterface.OnClickListener() {
+				public void onClick(DialogInterface dialog, int which) {
+					if (core != null){
+						if (core.authenticatePassword(mPasswordView.getText().toString())) {
+							createUI(getActivity());
+						} else {
+							requestPassword(getActivity());
+						}
+					}
+					else {
+						// Log.d(TAG, "core is null");
+					}
+				}
+			});
+			alert.setNegativeButton(resources.getIdentifier("cancel", "string", packageName),
+					new DialogInterface.OnClickListener() {
+
+				public void onClick(DialogInterface dialog, int which) {
+					// finish();
+				}
+			});
+			alert.show();
 		}
 
 		private MuPDFCore openFile(String path) {
@@ -173,6 +263,10 @@ public class ViewProxy extends TiViewProxy {
 			return core;
 		}
 
+		public boolean getNeedsPassword() {
+			return needsPassword;
+		}
+
 		public int getPageCount() {
 			return pageCount;
 		}
@@ -203,9 +297,18 @@ public class ViewProxy extends TiViewProxy {
 				return;
 			mDocView.setScrollingDirectionHorizontal(value);
 		}
-		
+
 		public void onSearch(KrollFunction callback) {
 			mSearchCallback = callback;
+		}
+
+		public void onPrint(KrollFunction callback) {
+			mPrintCallback = callback;
+		}
+
+		public void onSuccess(KrollFunction callback) {
+			Log.d(TAG, "onSuccess");
+			mSuccessCallback = callback;
 		}
 
 		public void search(String key, int pageNumber, boolean showResult) {
@@ -213,6 +316,64 @@ public class ViewProxy extends TiViewProxy {
 				return;
 			renderResult = showResult;
 			mSearchTask.go(key, 0, currentPage - 1, pageNumber - 1);
+		}
+
+		public void print() {
+			Log.d(TAG, "print");
+
+			PrintManager printManager = (PrintManager) getActivity().getSystemService(Context.PRINT_SERVICE);
+			String jobName = "Document";
+
+			PrintDocumentAdapter pda = new PrintDocumentAdapter(){
+
+			    @Override
+			    public void onWrite(PageRange[] pages, ParcelFileDescriptor destination, CancellationSignal cancellationSignal, WriteResultCallback callback){
+			        InputStream input = null;
+			        OutputStream output = null;
+
+			        try {
+
+			            input = new FileInputStream(file);
+			            output = new FileOutputStream(destination.getFileDescriptor());
+
+			            byte[] buf = new byte[1024];
+			            int bytesRead;
+
+			            while ((bytesRead = input.read(buf)) > 0) {
+			                 output.write(buf, 0, bytesRead);
+			            }
+
+			            callback.onWriteFinished(new PageRange[]{PageRange.ALL_PAGES});
+
+			        } catch (FileNotFoundException ee){
+			            //Catch exception
+			        } catch (Exception e) {
+			            //Catch exception
+			        } finally {
+			            try {
+			                input.close();
+			                output.close();
+			            } catch (IOException e) {
+			                e.printStackTrace();
+			            }
+			        }
+			    }
+
+			    @Override
+			    public void onLayout(PrintAttributes oldAttributes, PrintAttributes newAttributes, CancellationSignal cancellationSignal, LayoutResultCallback callback, Bundle extras){
+
+			        if (cancellationSignal.isCanceled()) {
+			            callback.onLayoutCancelled();
+			            return;
+			        }
+							String jobName = "Document";
+			        PrintDocumentInfo pdi = new PrintDocumentInfo.Builder(jobName).setContentType(PrintDocumentInfo.CONTENT_TYPE_DOCUMENT).build();
+			        callback.onLayoutFinished(pdi, true);
+			    }
+			};
+
+			printManager.print(jobName, pda, null);
+
 		}
 
 		public void setHighlightColor(String color) {
@@ -273,6 +434,12 @@ public class ViewProxy extends TiViewProxy {
 		setPropertyAndFire(TiC.PROPERTY_FILE, file);
 	}
 
+	@Kroll.getProperty @Kroll.method
+  public boolean getNeedsPassword()
+  {
+    return getPDFReaderView().getNeedsPassword();
+  }
+
 	@Kroll.method
 	public int getPageCount() {
 		return getPDFReaderView().getPageCount();
@@ -308,10 +475,15 @@ public class ViewProxy extends TiViewProxy {
 	public void setScrollingDirection(int direction) {
 		getPDFReaderView().setScrollingDirectionHorizontal(direction == MupdfModule.DIRECTION_HORIZONTAL);
 	}
-	
+
 	@Kroll.method
 	public void onSearch(KrollFunction callback) {
 		getPDFReaderView().onSearch(callback);
+	}
+
+	@Kroll.method
+	public void onSuccess(KrollFunction callback) {
+		getPDFReaderView().onSuccess(callback);
 	}
 
 	@Kroll.method
@@ -327,5 +499,10 @@ public class ViewProxy extends TiViewProxy {
 	@Kroll.method
 	public void setHighlightColor(String color) {
 		getPDFReaderView().setHighlightColor(color);
+	}
+
+	@Kroll.method
+	public void print() {
+		getPDFReaderView().print();
 	}
 }
